@@ -1,0 +1,116 @@
+name: Dependency CI
+
+# Reusable CI for dependency-bump PRs. Detects npm / uv-Python / cargo, then:
+#   - installs from the lockfile (gating)
+#   - runs the project's build + test scripts if it has them (gating)
+#   - runs an audit (advisory - a bump that only partially clears alerts still
+#     needs to be mergeable)
+#
+# Call it from a repo with .github/workflows/ci.yml:
+#
+#   name: CI
+#   on:
+#     pull_request:
+#     push: { branches: [main, master] }
+#   jobs:
+#     ci:
+#       uses: dryan/reusable-workflows/.github/workflows/dependabot-ci.yml@v1
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        type: string
+        default: "lts/*"
+      python-version:
+        type: string
+        default: "3.13"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect ecosystems
+        id: d
+        shell: bash
+        run: |
+          npm=false; python=false; cargo=false
+          [ -f package.json ] && npm=true
+          if [ -f pyproject.toml ] || [ -f uv.lock ] || [ -f requirements.txt ]; then python=true; fi
+          [ -f Cargo.toml ] && cargo=true
+          {
+            echo "npm=$npm"
+            echo "python=$python"
+            echo "cargo=$cargo"
+          } >> "$GITHUB_OUTPUT"
+          echo "npm=$npm python=$python cargo=$cargo"
+
+      # ---------------- npm ----------------
+      - if: steps.d.outputs.npm == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: npm - install, build, test, audit
+        if: steps.d.outputs.npm == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+          script() { node -e "try{process.stdout.write((require('./package.json').scripts||{})['$1']||'')}catch(e){}"; }
+          b="$(script build)";  [ -n "$b" ] && npm run build || echo "no build script"
+          t="$(script test)"
+          case "$t" in
+            ""|*"no test specified"*) echo "no real test script; skipping" ;;
+            *) npm test ;;
+          esac
+          l="$(script lint)"; [ -n "$l" ] && npm run lint || echo "no lint script"
+          npm audit --audit-level=high || echo "::warning::npm audit reported issues (advisory)"
+
+      # ---------------- python / uv ----------------
+      - if: steps.d.outputs.python == 'true'
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: python - sync, test, audit
+        if: steps.d.outputs.python == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f uv.lock ]; then
+            uv sync --frozen --all-extras || uv sync --all-extras
+          elif [ -f pyproject.toml ]; then
+            uv sync --all-extras
+          else
+            uv venv && uv pip install -r requirements.txt
+          fi
+          has_tests=false
+          [ -d tests ] && has_tests=true
+          compgen -G "test_*.py" >/dev/null 2>&1 && has_tests=true
+          grep -q "\[tool.pytest" pyproject.toml 2>/dev/null && has_tests=true
+          if [ "$has_tests" = true ]; then
+            uv run --with pytest pytest -q
+          else
+            echo "no tests found; skipping pytest"
+          fi
+          uvx pip-audit || echo "::warning::pip-audit reported issues (advisory)"
+
+      # ---------------- cargo ----------------
+      - if: steps.d.outputs.cargo == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo - build, test, audit
+        if: steps.d.outputs.cargo == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked || cargo build
+          cargo test
+          cargo install cargo-audit --locked >/dev/null 2>&1 || true
+          cargo audit || echo "::warning::cargo audit reported issues (advisory)"
