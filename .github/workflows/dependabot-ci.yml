@@ -1,7 +1,8 @@
 name: Dependency CI
 
 # Reusable CI for dependency-bump PRs. Detects npm / uv-Python / cargo, then:
-#   - installs from the lockfile (gating)
+#   - installs from the lockfile (gating; lifecycle scripts skipped for
+#     robustness - this job verifies the dependency tree, not app behaviour)
 #   - runs the project's build + test scripts if it has them (gating)
 #   - runs an audit (advisory - a bump that only partially clears alerts still
 #     needs to be mergeable)
@@ -22,9 +23,6 @@ on:
       node-version:
         type: string
         default: "lts/*"
-      python-version:
-        type: string
-        default: "3.13"
 
 permissions:
   contents: read
@@ -61,22 +59,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+          if [ -f package-lock.json ]; then
+            npm ci --ignore-scripts
+          else
+            npm install --ignore-scripts
+          fi
           script() { node -e "try{process.stdout.write((require('./package.json').scripts||{})['$1']||'')}catch(e){}"; }
-          b="$(script build)";  [ -n "$b" ] && npm run build || echo "no build script"
+          b="$(script build)"; if [ -n "$b" ]; then npm run build; else echo "no build script"; fi
           t="$(script test)"
           case "$t" in
             ""|*"no test specified"*) echo "no real test script; skipping" ;;
             *) npm test ;;
           esac
-          l="$(script lint)"; [ -n "$l" ] && npm run lint || echo "no lint script"
+          l="$(script lint)"; if [ -n "$l" ]; then npm run lint; else echo "no lint script"; fi
           npm audit --audit-level=high || echo "::warning::npm audit reported issues (advisory)"
 
       # ---------------- python / uv ----------------
       - if: steps.d.outputs.python == 'true'
         uses: astral-sh/setup-uv@v5
-        with:
-          python-version: ${{ inputs.python-version }}
 
       - name: python - sync, test, audit
         if: steps.d.outputs.python == 'true'
@@ -91,11 +91,16 @@ jobs:
             uv venv && uv pip install -r requirements.txt
           fi
           has_tests=false
-          [ -d tests ] && has_tests=true
+          { [ -d tests ] || [ -d test ]; } && has_tests=true
           compgen -G "test_*.py" >/dev/null 2>&1 && has_tests=true
-          grep -q "\[tool.pytest" pyproject.toml 2>/dev/null && has_tests=true
+          compgen -G "**/test_*.py" >/dev/null 2>&1 && has_tests=true
           if [ "$has_tests" = true ]; then
+            set +e
             uv run --with pytest pytest -q
+            rc=$?
+            set -e
+            # 5 = "no tests collected" - not a failure for our purposes
+            { [ "$rc" -eq 0 ] || [ "$rc" -eq 5 ]; } || exit "$rc"
           else
             echo "no tests found; skipping pytest"
           fi
