@@ -23,6 +23,11 @@ on:
       node-version:
         type: string
         default: "lts/*"
+    secrets:
+      ssh_key:
+        # private key for an ssh-agent - lets `uv sync` / `npm ci` reach
+        # private git dependencies (add the matching deploy key to that repo)
+        required: false
 
 permissions:
   contents: read
@@ -32,6 +37,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: SSH key for private git deps
+        env:
+          SSH_KEY: ${{ secrets.ssh_key }}
+        if: env.SSH_KEY != ''
+        uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: ${{ secrets.ssh_key }}
 
       - name: Init submodules (best effort - e.g. .pedantry shared configs)
         shell: bash
