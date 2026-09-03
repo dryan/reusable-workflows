@@ -32,8 +32,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive # e.g. .pedantry shared configs
+
+      - name: Init submodules (best effort - e.g. .pedantry shared configs)
+        shell: bash
+        run: |
+          git submodule update --init --recursive \
+            || echo "::warning::submodule init failed; continuing without them"
 
       - name: Detect ecosystems
         id: d
