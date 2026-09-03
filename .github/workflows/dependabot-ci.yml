@@ -24,12 +24,6 @@ on:
         type: string
         default: "lts/*"
 
-# `github.*` here is the caller's context, so this groups per caller workflow +
-# ref: a new push to a PR cancels that PR's in-flight run.
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 permissions:
   contents: read
 
