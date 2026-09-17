@@ -28,6 +28,10 @@ on:
         # private key for an ssh-agent - lets `uv sync` / `npm ci` reach
         # private git dependencies (add the matching deploy key to that repo)
         required: false
+      npmrc:
+        # base64-encoded .npmrc contents - lets `npm ci` authenticate against
+        # private/scoped registries (e.g. a Font Awesome Pro kit)
+        required: false
 
 permissions:
   contents: read
@@ -72,6 +76,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
+
+      - name: Write .npmrc for private registries
+        env:
+          NPMRC: ${{ secrets.npmrc }}
+        if: steps.d.outputs.npm == 'true' && env.NPMRC != ''
+        shell: bash
+        run: echo "$NPMRC" | base64 -d > ~/.npmrc
 
       - name: npm - install, build, test, audit
         if: steps.d.outputs.npm == 'true'
