@@ -16,11 +16,11 @@ name: Dependency CI
 #   jobs:
 #     ci:
 #       uses: dryan/reusable-workflows/.github/workflows/dependabot-ci.yml@v1
-#       # optional, for a private/scoped npm registry (any number of scopes
-#       # can share one registry + token):
-#       # with:
-#       #   npm-registry-url: https://npm.example.com/
-#       #   npm-scopes: '@example,@example-other'
+#       # optional, for a private/scoped npm registry: commit an .npmrc with
+#       # the registry mapping(s) and an ${NPM_TOKEN} expansion (npm expands
+#       # env vars in .npmrc itself - see
+#       # https://developers.cloudflare.com/pages/how-to/npm-private-registry/),
+#       # then just pass the token through:
 #       # secrets:
 #       #   npm_token: ${{ secrets.NPM_TOKEN }}
 
@@ -30,24 +30,14 @@ on:
       node-version:
         type: string
         default: "lts/*"
-      npm-registry-url:
-        # e.g. https://npm.fontawesome.com/ - pairs with npm-scopes and the
-        # npm_token secret to authenticate against a private/scoped registry
-        type: string
-        default: ""
-      npm-scopes:
-        # comma-separated, e.g. "@awesome.me,@fortawesome" - all scopes that
-        # resolve against npm-registry-url
-        type: string
-        default: ""
     secrets:
       ssh_key:
         # private key for an ssh-agent - lets `uv sync` / `npm ci` reach
         # private git dependencies (add the matching deploy key to that repo)
         required: false
       npm_token:
-        # auth token for npm-registry-url (see actions/setup-node's
-        # registry-url/scope + NODE_AUTH_TOKEN convention)
+        # exposed as NPM_TOKEN for npm ci/install to consume via a checked-in
+        # .npmrc's ${NPM_TOKEN} expansion (private/scoped registries)
         required: false
 
 permissions:
@@ -73,6 +63,23 @@ jobs:
           git submodule update --init --recursive \
             || echo "::warning::submodule init failed; continuing without them"
 
+      - name: Guard against literal secrets in .npmrc
+        # a committed .npmrc should only ever hold registry mappings and
+        # ${ENV_VAR} expansions (see
+        # https://developers.cloudflare.com/pages/how-to/npm-private-registry/)
+        # - flag any _authToken/_auth/_password line with a literal value
+        shell: bash
+        run: |
+          set -euo pipefail
+          bad=0
+          while IFS= read -r -d '' f; do
+            if grep -nP '_(authToken|password|auth)\s*=\s*(?!\$\{)\S' "$f"; then
+              echo "::error file=$f::Literal-looking credential committed in .npmrc - use \${ENV_VAR} expansion instead"
+              bad=1
+            fi
+          done < <(find . -name .npmrc -not -path '*/node_modules/*' -print0)
+          exit "$bad"
+
       - name: Detect ecosystems
         id: d
         shell: bash
@@ -94,27 +101,10 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
 
-      - name: Configure private npm registry
-        # setup-node's registry-url/scope inputs only take one scope; this
-        # repo's Font Awesome packages span two (@awesome.me, @fortawesome)
-        # sharing one registry + token, so scopes are looped explicitly.
-        # Only the registry mapping (not a secret) is written here - the
-        # token comes from NODE_AUTH_TOKEN, same convention setup-node uses.
-        if: steps.d.outputs.npm == 'true' && inputs.npm-registry-url != ''
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.npm_token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          host="${{ inputs.npm-registry-url }}"
-          hostpath="$(echo "$host" | sed -E 's#^https?://##')"
-          for scope in $(echo "${{ inputs.npm-scopes }}" | tr ',' ' '); do
-            echo "${scope}:registry=${host}" >> ~/.npmrc
-          done
-          echo "//${hostpath}:_authToken=${NODE_AUTH_TOKEN}" >> ~/.npmrc
-
       - name: npm - install, build, test, audit
         if: steps.d.outputs.npm == 'true'
+        env:
+          NPM_TOKEN: ${{ secrets.npm_token }}
         shell: bash
         run: |
           set -euo pipefail
