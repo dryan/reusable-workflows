@@ -16,6 +16,13 @@ name: Dependency CI
 #   jobs:
 #     ci:
 #       uses: dryan/reusable-workflows/.github/workflows/dependabot-ci.yml@v1
+#       # optional, for a private/scoped npm registry: commit an .npmrc with
+#       # the registry mapping(s) and an ${NPM_TOKEN} expansion (npm expands
+#       # env vars in .npmrc itself - see
+#       # https://developers.cloudflare.com/pages/how-to/npm-private-registry/),
+#       # then just pass the token through:
+#       # secrets:
+#       #   npm_token: ${{ secrets.NPM_TOKEN }}
 
 on:
   workflow_call:
@@ -28,9 +35,9 @@ on:
         # private key for an ssh-agent - lets `uv sync` / `npm ci` reach
         # private git dependencies (add the matching deploy key to that repo)
         required: false
-      npmrc:
-        # base64-encoded .npmrc contents - lets `npm ci` authenticate against
-        # private/scoped registries (e.g. a Font Awesome Pro kit)
+      npm_token:
+        # exposed as NPM_TOKEN for npm ci/install to consume via a checked-in
+        # .npmrc's ${NPM_TOKEN} expansion (private/scoped registries)
         required: false
 
 permissions:
@@ -56,6 +63,23 @@ jobs:
           git submodule update --init --recursive \
             || echo "::warning::submodule init failed; continuing without them"
 
+      - name: Guard against literal secrets in .npmrc
+        # a committed .npmrc should only ever hold registry mappings and
+        # ${ENV_VAR} expansions (see
+        # https://developers.cloudflare.com/pages/how-to/npm-private-registry/)
+        # - flag any _authToken/_auth/_password line with a literal value
+        shell: bash
+        run: |
+          set -euo pipefail
+          bad=0
+          while IFS= read -r -d '' f; do
+            if grep -nP '_(authToken|password|auth)\s*=\s*(?!\$\{)\S' "$f"; then
+              echo "::error file=$f::Literal-looking credential committed in .npmrc - use \${ENV_VAR} expansion instead"
+              bad=1
+            fi
+          done < <(find . -name .npmrc -not -path '*/node_modules/*' -print0)
+          exit "$bad"
+
       - name: Detect ecosystems
         id: d
         shell: bash
@@ -77,15 +101,10 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
 
-      - name: Write .npmrc for private registries
-        env:
-          NPMRC: ${{ secrets.npmrc }}
-        if: steps.d.outputs.npm == 'true' && env.NPMRC != ''
-        shell: bash
-        run: echo "$NPMRC" | base64 -d > ~/.npmrc
-
       - name: npm - install, build, test, audit
         if: steps.d.outputs.npm == 'true'
+        env:
+          NPM_TOKEN: ${{ secrets.npm_token }}
         shell: bash
         run: |
           set -euo pipefail
