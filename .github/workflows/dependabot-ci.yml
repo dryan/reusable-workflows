@@ -16,6 +16,13 @@ name: Dependency CI
 #   jobs:
 #     ci:
 #       uses: dryan/reusable-workflows/.github/workflows/dependabot-ci.yml@v1
+#       # optional, for a private/scoped npm registry (any number of scopes
+#       # can share one registry + token):
+#       # with:
+#       #   npm-registry-url: https://npm.example.com/
+#       #   npm-scopes: '@example,@example-other'
+#       # secrets:
+#       #   npm_token: ${{ secrets.NPM_TOKEN }}
 
 on:
   workflow_call:
@@ -23,14 +30,24 @@ on:
       node-version:
         type: string
         default: "lts/*"
+      npm-registry-url:
+        # e.g. https://npm.fontawesome.com/ - pairs with npm-scopes and the
+        # npm_token secret to authenticate against a private/scoped registry
+        type: string
+        default: ""
+      npm-scopes:
+        # comma-separated, e.g. "@awesome.me,@fortawesome" - all scopes that
+        # resolve against npm-registry-url
+        type: string
+        default: ""
     secrets:
       ssh_key:
         # private key for an ssh-agent - lets `uv sync` / `npm ci` reach
         # private git dependencies (add the matching deploy key to that repo)
         required: false
-      npmrc:
-        # base64-encoded .npmrc contents - lets `npm ci` authenticate against
-        # private/scoped registries (e.g. a Font Awesome Pro kit)
+      npm_token:
+        # auth token for npm-registry-url (see actions/setup-node's
+        # registry-url/scope + NODE_AUTH_TOKEN convention)
         required: false
 
 permissions:
@@ -77,12 +94,24 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
 
-      - name: Write .npmrc for private registries
+      - name: Configure private npm registry
+        # setup-node's registry-url/scope inputs only take one scope; this
+        # repo's Font Awesome packages span two (@awesome.me, @fortawesome)
+        # sharing one registry + token, so scopes are looped explicitly.
+        # Only the registry mapping (not a secret) is written here - the
+        # token comes from NODE_AUTH_TOKEN, same convention setup-node uses.
+        if: steps.d.outputs.npm == 'true' && inputs.npm-registry-url != ''
         env:
-          NPMRC: ${{ secrets.npmrc }}
-        if: steps.d.outputs.npm == 'true' && env.NPMRC != ''
+          NODE_AUTH_TOKEN: ${{ secrets.npm_token }}
         shell: bash
-        run: echo "$NPMRC" | base64 -d > ~/.npmrc
+        run: |
+          set -euo pipefail
+          host="${{ inputs.npm-registry-url }}"
+          hostpath="$(echo "$host" | sed -E 's#^https?://##')"
+          for scope in $(echo "${{ inputs.npm-scopes }}" | tr ',' ' '); do
+            echo "${scope}:registry=${host}" >> ~/.npmrc
+          done
+          echo "//${hostpath}:_authToken=${NODE_AUTH_TOKEN}" >> ~/.npmrc
 
       - name: npm - install, build, test, audit
         if: steps.d.outputs.npm == 'true'
