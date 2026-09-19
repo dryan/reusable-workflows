@@ -2,7 +2,7 @@
 
 Shared GitHub Actions workflows.
 
-## `dependabot-ci.yml` — Dependency CI
+## `dependabot-ci.yml`: Dependency CI
 
 A generic `workflow_call` CI job for repos that don't have their own. Detects
 npm / uv-Python / cargo and runs install → build → test → audit. Install and the
@@ -26,8 +26,11 @@ on:
     branches: [main, master]
 jobs:
   ci:
-    uses: dryan/reusable-workflows/.github/workflows/dependabot-ci.yml@v1
+    uses: dryan/reusable-workflows/dependabot-ci.yml@v2
 ```
+
+`@v1`, at the longer path `.github/workflows/dependabot-ci.yml`, still works
+but is deprecated. Move callers to `@v2`'s shorter root-level path.
 
 The status check appears as **`ci / build`**. Pin the ruleset's required check
 to that.
@@ -38,10 +41,13 @@ Inputs (all optional): `node-version` (default `lts/*`), `python-version`
 ### Repos with infra-dependent tests
 
 If a repo's test suite needs a database, secrets, or services the generic job
-can't provide, don't use this stub — give the repo a real `ci.yml` of its own
+can't provide, don't use this stub. Give the repo a real `ci.yml` of its own
 and point the ruleset at that check instead.
 
 ## Versioning
 
-Callers pin `@v1`. The `v1` tag moves forward for backward-compatible changes;
-breaking changes get `@v2`.
+Callers pin `@v2` (path: `dependabot-ci.yml`, at the repo root). The `v2` tag
+moves forward for backward-compatible changes; breaking changes get `@v3`.
+
+`@v1` (path: `.github/workflows/dependabot-ci.yml`) is deprecated and frozen;
+it will be removed once all callers migrate.

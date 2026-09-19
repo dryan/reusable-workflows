@@ -1,0 +1,170 @@
+name: Dependency CI
+
+# Reusable CI for dependency-bump PRs. Detects npm / uv-Python / cargo, then:
+#   - installs from the lockfile (gating; lifecycle scripts skipped for
+#     robustness - this job verifies the dependency tree, not app behaviour)
+#   - runs the project's build + test scripts if it has them (gating)
+#   - runs an audit (advisory - a bump that only partially clears alerts still
+#     needs to be mergeable)
+#
+# Call it from a repo with .github/workflows/ci.yml:
+#
+#   name: CI
+#   on:
+#     pull_request:
+#     push: { branches: [main, master] }
+#   jobs:
+#     ci:
+#       uses: dryan/reusable-workflows/dependabot-ci.yml@v2
+#       # optional, for a private/scoped npm registry: commit an .npmrc with
+#       # the registry mapping(s) and an ${NPM_TOKEN} expansion (npm expands
+#       # env vars in .npmrc itself - see
+#       # https://developers.cloudflare.com/pages/how-to/npm-private-registry/),
+#       # then just pass the token through:
+#       # secrets:
+#       #   npm_token: ${{ secrets.NPM_TOKEN }}
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        type: string
+        default: "lts/*"
+    secrets:
+      ssh_key:
+        # private key for an ssh-agent - lets `uv sync` / `npm ci` reach
+        # private git dependencies (add the matching deploy key to that repo)
+        required: false
+      npm_token:
+        # exposed as NPM_TOKEN for npm ci/install to consume via a checked-in
+        # .npmrc's ${NPM_TOKEN} expansion (private/scoped registries)
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: SSH key for private git deps
+        env:
+          SSH_KEY: ${{ secrets.ssh_key }}
+        if: env.SSH_KEY != ''
+        uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: ${{ secrets.ssh_key }}
+
+      - name: Init submodules (best effort - e.g. .pedantry shared configs)
+        shell: bash
+        run: |
+          git submodule update --init --recursive \
+            || echo "::warning::submodule init failed; continuing without them"
+
+      - name: Guard against literal secrets in .npmrc
+        # a committed .npmrc should only ever hold registry mappings and
+        # ${ENV_VAR} expansions (see
+        # https://developers.cloudflare.com/pages/how-to/npm-private-registry/)
+        # - flag any _authToken/_auth/_password line with a literal value
+        shell: bash
+        run: |
+          set -euo pipefail
+          bad=0
+          while IFS= read -r -d '' f; do
+            if grep -nP '_(authToken|password|auth)\s*=\s*(?!\$\{)\S' "$f"; then
+              echo "::error file=$f::Literal-looking credential committed in .npmrc - use \${ENV_VAR} expansion instead"
+              bad=1
+            fi
+          done < <(find . -name .npmrc -not -path '*/node_modules/*' -print0)
+          exit "$bad"
+
+      - name: Detect ecosystems
+        id: d
+        shell: bash
+        run: |
+          npm=false; python=false; cargo=false
+          [ -f package.json ] && npm=true
+          if [ -f pyproject.toml ] || [ -f uv.lock ] || [ -f requirements.txt ]; then python=true; fi
+          [ -f Cargo.toml ] && cargo=true
+          {
+            echo "npm=$npm"
+            echo "python=$python"
+            echo "cargo=$cargo"
+          } >> "$GITHUB_OUTPUT"
+          echo "npm=$npm python=$python cargo=$cargo"
+
+      # ---------------- npm ----------------
+      - if: steps.d.outputs.npm == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: npm - install, build, test, audit
+        if: steps.d.outputs.npm == 'true'
+        env:
+          NPM_TOKEN: ${{ secrets.npm_token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f package-lock.json ]; then
+            npm ci --ignore-scripts
+          else
+            npm install --ignore-scripts
+          fi
+          script() { node -e "try{process.stdout.write((require('./package.json').scripts||{})['$1']||'')}catch(e){}"; }
+          b="$(script build)"; if [ -n "$b" ]; then npm run build; else echo "no build script"; fi
+          t="$(script test)"
+          case "$t" in
+            ""|*"no test specified"*) echo "no real test script; skipping" ;;
+            *) npm test ;;
+          esac
+          l="$(script lint)"; if [ -n "$l" ]; then npm run lint; else echo "no lint script"; fi
+          npm audit --audit-level=high || echo "::warning::npm audit reported issues (advisory)"
+
+      # ---------------- python / uv ----------------
+      - if: steps.d.outputs.python == 'true'
+        uses: astral-sh/setup-uv@v5
+
+      - name: python - sync, test, audit
+        if: steps.d.outputs.python == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f uv.lock ]; then
+            uv sync --frozen --all-extras || uv sync --all-extras
+          elif [ -f pyproject.toml ]; then
+            uv sync --all-extras
+          else
+            uv venv && uv pip install -r requirements.txt
+          fi
+          has_tests=false
+          { [ -d tests ] || [ -d test ]; } && has_tests=true
+          compgen -G "test_*.py" >/dev/null 2>&1 && has_tests=true
+          compgen -G "**/test_*.py" >/dev/null 2>&1 && has_tests=true
+          if [ "$has_tests" = true ]; then
+            set +e
+            uv run --with pytest pytest -q
+            rc=$?
+            set -e
+            # 5 = "no tests collected" - not a failure for our purposes
+            { [ "$rc" -eq 0 ] || [ "$rc" -eq 5 ]; } || exit "$rc"
+          else
+            echo "no tests found; skipping pytest"
+          fi
+          uvx pip-audit || echo "::warning::pip-audit reported issues (advisory)"
+
+      # ---------------- cargo ----------------
+      - if: steps.d.outputs.cargo == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo - build, test, audit
+        if: steps.d.outputs.cargo == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked || cargo build
+          cargo test
+          cargo install cargo-audit --locked >/dev/null 2>&1 || true
+          cargo audit || echo "::warning::cargo audit reported issues (advisory)"
