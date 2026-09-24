@@ -60,8 +60,15 @@ jobs:
       - name: Init submodules (best effort - e.g. .pedantry shared configs)
         shell: bash
         run: |
-          git submodule update --init --recursive \
-            || echo "::warning::submodule init failed; continuing without them"
+          # One submodule at a time: a private or unreachable one (no token in
+          # CI) must not abort the whole update and leave a good one (.pedantry)
+          # cloned but never checked out.
+          [ -f .gitmodules ] || exit 0
+          { git config -f .gitmodules --get-regexp '^submodule\..*\.path$' || true; } \
+            | while read -r _ path; do
+                git submodule update --init --recursive -- "$path" \
+                  || echo "::warning::submodule $path init failed; continuing without it"
+              done
 
       - name: Guard against literal secrets in .npmrc
         # a committed .npmrc should only ever hold registry mappings and
